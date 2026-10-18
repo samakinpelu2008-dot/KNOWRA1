@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    // Admin = a document at users/{yourUid} with role == "admin".
+    // Set this by hand in the Firebase console. Nobody can grant it to themselves.
+    function isAdmin() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == "admin";
+    }
+
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.role == "contributor";
+      allow update: if signedIn() && request.auth.uid == uid
+        && request.resource.data.role == resource.data.role;
+      allow delete: if isAdmin();
+    }
+
+    // Public reading: only published items are visible. Admin sees everything.
+    match /articles/{id} {
+      allow read: if resource.data.status == "published" || isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /books/{id} {
+      allow read: if resource.data.status == "published" || isAdmin();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Book files live in Firestore as base64 chunks (no Firebase Storage needed).
+    // Chunk id = {bookId}_{index}. Public can read a chunk only once the book is published.
+    match /bookChunks/{chunkId} {
+      allow get: if isAdmin()
+        || (signedIn() && resource.data.submitterId == request.auth.uid)
+        || (exists(/databases/$(database)/documents/books/$(resource.data.bookId))
+            && get(/databases/$(database)/documents/books/$(resource.data.bookId)).data.status == "published");
+      allow list: if isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.submitterId == request.auth.uid
+        && request.resource.data.keys().hasOnly(["bookId", "index", "data", "submitterId"])
+        && request.resource.data.data is string
+        && request.resource.data.data.size() <= 720000
+        && request.resource.data.index is int
+        && chunkId == request.resource.data.bookId + "_" + string(request.resource.data.index);
+      allow update, delete: if isAdmin();
+    }
+
+    // Contributions waiting for review.
+    match /submissions/{id} {
+      allow create: if signedIn()
+        && request.resource.data.submitterId == request.auth.uid
+        && request.resource.data.status == "pending"
+        && request.resource.data.contentType in ["article", "book"]
+        && request.resource.data.title is string
+        && request.resource.data.title.size() > 0
+        && request.resource.data.title.size() <= 160
+        && (request.resource.data.contentType != "article"
+            || (request.resource.data.body is string
+                && request.resource.data.body.size() >= 80
+                && request.resource.data.body.size() <= 50000));
+      allow get: if signedIn() && (resource.data.submitterId == request.auth.uid || isAdmin());
+      allow list: if signedIn() && (resource.data.submitterId == request.auth.uid || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+  }
+}
